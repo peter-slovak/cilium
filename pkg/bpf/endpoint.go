@@ -40,7 +40,7 @@ type EndpointKey struct {
 // GetKeyPtr returns the unsafe pointer to the BPF key
 func (k EndpointKey) GetKeyPtr() unsafe.Pointer { return unsafe.Pointer(&k) }
 
-// GetValuePtr returns the unsafe pointer to the BPF value
+// GetValuePtr returns the unsafe pointer to the BPF KEY <<<< NOTE!
 func (k EndpointKey) GetValuePtr() unsafe.Pointer { return unsafe.Pointer(&k) }
 
 // NewEndpointKey returns an EndpointKey based on the provided IP address. The
