@@ -23,6 +23,7 @@ import (
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/byteorder"
 	"github.com/cilium/cilium/pkg/logging"
+	"github.com/cilium/cilium/pkg/logging/logfields"
 )
 
 var log = logging.DefaultLogger
@@ -194,6 +195,16 @@ func AddHostEntry(ip net.IP) error {
 	key := NewEndpointKey(ip)
 	ep := &EndpointInfo{Flags: EndpointFlagHost}
 	return LXCMap.Update(key, ep)
+}
+
+func SyncHostEntry(ip net.IP) error {
+	key := NewEndpointKey(ip)
+	value, err := LXCMap.Lookup(key)
+	if err != nil || value.(*EndpointInfo).Flags&EndpointFlagHost == 0 {
+		log.WithError(err).WithField(logfields.IPAddr, ip).Debugf("Adding local ip to endpoint map")
+		return AddHostEntry(ip)
+	}
+	return nil
 }
 
 // DeleteEntry deletes a single map entry

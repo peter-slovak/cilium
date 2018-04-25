@@ -40,6 +40,7 @@ import (
 	"github.com/cilium/cilium/pkg/apierror"
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/byteorder"
+	"github.com/cilium/cilium/pkg/controller"
 	"github.com/cilium/cilium/pkg/endpoint"
 	"github.com/cilium/cilium/pkg/endpointmanager"
 	"github.com/cilium/cilium/pkg/envoy"
@@ -826,32 +827,9 @@ func (d *Daemon) init() error {
 			return err
 		}
 
-		// Clean all endpoint entries
-		if err := lxcmap.LXCMap.DeleteAll(); err != nil {
+		// Start LXCMap synchronization controller
+		if err := d.startLXCMapSync(); err != nil {
 			return err
-		}
-
-		localIPs := []net.IP{
-			node.GetInternalIPv4(),
-			node.GetExternalIPv4(),
-			node.GetIPv6(),
-			node.GetIPv6Router(),
-		}
-		for _, ip := range localIPs {
-			log.WithField(logfields.IPAddr, ip).Debug("Adding local ip to endpoint map")
-			if err := lxcmap.AddHostEntry(ip); err != nil {
-				return fmt.Errorf("Unable to add host entry to endpoint map: %s", err)
-			}
-
-			log.WithField(logfields.IPAddr, ip).Debug("Adding local ip to ipcache")
-			ipcache.IPIdentityCache.Upsert(ip.String(), identity.ReservedIdentityHost)
-
-			// The ipcache hasn't been bootstrapped yet, and we don't actually
-			// want to propagate reserved:host->ID mappings across the cluster.
-			// Manually push it into each IPIdentityMappingListener.
-			localIPIDPair := identity.IPIdentityPair{IP: ip, ID: identity.ReservedIdentityHost}
-			d.OnIPIdentityCacheChange(ipcache.Upsert, localIPIDPair)
-			envoy.NetworkPolicyHostsCache.OnIPIdentityCacheChange(ipcache.Upsert, localIPIDPair)
 		}
 
 		if _, err := lbmap.Service6Map.OpenOrCreate(); err != nil {
@@ -902,6 +880,51 @@ func (d *Daemon) init() error {
 		}
 	}
 
+	return nil
+}
+
+// startLXCMapSync spawns a controller which synchronizes the host entries in BPF lxc Map
+// with the in-memory host IP address values.
+func (d *Daemon) startLXCMapSync() error {
+	// Initially, clean all endpoint entries
+	if err := lxcmap.LXCMap.DeleteAll(); err != nil {
+		return err
+	}
+
+	controller.NewManager().UpdateController("lxcmap-bpf-host-sync",
+		controller.ControllerParams{
+			DoFunc: func() error {
+				// TODO: Update addresses first, in case node addressing has changed.
+				// TODO: Once these start changing on runtime, figure out the locking strategy.
+				// TODO: Delete stale host entries from the lxcmap.
+				localIPs := []net.IP{
+					node.GetInternalIPv4(),
+					node.GetExternalIPv4(),
+					node.GetIPv6(),
+					node.GetIPv6Router(),
+				}
+
+				for _, ip := range localIPs {
+					if err := lxcmap.SyncHostEntry(ip); err != nil {
+						return fmt.Errorf("Unable to add host entry to endpoint map: %s", err)
+					}
+					id, exists := ipcache.IPIdentityCache.LookupByIP(ip.String())
+					if !exists || id != identity.ReservedIdentityHost {
+						// Upsert will not propagate (reserved:host->ID) mappings across the cluster.
+						// Manually push it into each IPIdentityMappingListener.
+						log.WithField(logfields.IPAddr, ip).Debug("Adding local ip to ipcache")
+						ipcache.IPIdentityCache.Upsert(ip.String(), identity.ReservedIdentityHost)
+
+						localIPIDPair := identity.IPIdentityPair{IP: ip, ID: identity.ReservedIdentityHost}
+						d.OnIPIdentityCacheChange(ipcache.Upsert, localIPIDPair)
+						envoy.NetworkPolicyHostsCache.OnIPIdentityCacheChange(ipcache.Upsert, localIPIDPair)
+					}
+				}
+				return nil
+			},
+			RunInterval: time.Duration(5) * time.Second,
+		})
+	// TODO: To keep the old behavior we should wait for one successful completion of the controller
 	return nil
 }
 
